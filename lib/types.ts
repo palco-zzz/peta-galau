@@ -27,6 +27,8 @@ export interface Story {
 export interface StatsResponse {
   totalStories: number;
   cityPulseCount: number;
+  topCity: string;
+  topCityCount: number;
   moodWeather: {
     mood: string;
     count: number;

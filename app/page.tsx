@@ -542,14 +542,24 @@ export default function App() {
         const mappedStories = stories.map(mapStoryToMarker);
         setMarkers(mappedStories);
         setCityPulseCount(stats.cityPulseCount);
+        setTopCity(stats.topCity);
+
+        // Map API moodWeather with mood metadata for display
+        const enrichedMoodWeather = stats.moodWeather
+          .map((item) => ({
+            ...item,
+            ...MOOD_CATEGORIES.find((c) => c.id === item.mood),
+          }))
+          .sort((a, b) => b.percentage - a.percentage);
+        setApiMoodWeather(enrichedMoodWeather);
       } catch (error) {
         console.error("Failed to fetch data:", error);
       }
     };
 
     fetchData();
-    // Refresh every minute
-    const interval = setInterval(fetchData, 60000);
+    // Refresh stats every 10 seconds for real-time feel
+    const interval = setInterval(fetchData, 10000);
     return () => clearInterval(interval);
   }, []);
 
@@ -562,7 +572,19 @@ export default function App() {
   const [newStory, setNewStory] = useState("");
   const [selectedMood, setSelectedMood] = useState<string>("heartbreak");
   const [isMuted, setIsMuted] = useState(true);
-  const [cityPulseCount, setCityPulseCount] = useState(3421);
+  const [cityPulseCount, setCityPulseCount] = useState(0);
+  const [topCity, setTopCity] = useState("Indonesia");
+  const [apiMoodWeather, setApiMoodWeather] = useState<
+    Array<{
+      mood: string;
+      count: number;
+      percentage: number;
+      id?: string;
+      emoji?: string;
+      label?: string;
+      color?: string;
+    }>
+  >([]);
   const [isDarkMode, setIsDarkMode] = useState(true);
   const [activeNav, setActiveNav] = useState("beranda");
   const [showExploreSidebar, setShowExploreSidebar] = useState(false);
@@ -590,8 +612,9 @@ export default function App() {
   // Feature 5: Custom Color
   const [customColor, setCustomColor] = useState<string | null>(null);
 
-  // Feature 7: Mood Weather
-  const moodWeather = useMemo(() => {
+  // Feature 7: Mood Weather - Use API data for real-time stats from ALL users
+  // Fallback to local computation if API data is not available yet
+  const localMoodWeather = useMemo(() => {
     const moodCounts = markers.reduce((acc, m) => {
       acc[m.mood] = (acc[m.mood] || 0) + 1;
       return acc;
@@ -606,6 +629,10 @@ export default function App() {
       }))
       .sort((a, b) => b.percentage - a.percentage);
   }, [markers]);
+
+  // Use API moodWeather if available, otherwise fallback to local
+  const moodWeather =
+    apiMoodWeather.length > 0 ? apiMoodWeather : localMoodWeather;
 
   // Feature 8: Badges
   const [unlockedBadges, setUnlockedBadges] = useState<string[]>(["night_owl"]);
@@ -633,12 +660,14 @@ export default function App() {
 
   // Refs
   const tileLayerRef = useRef<any>(null);
+  const lightTileLayerRef = useRef<any>(null);
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapInstance = useRef<any>(null);
   const markersGroup = useRef<any>(null);
   const heatLayer = useRef<any>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const constellationLayer = useRef<any>(null);
+  const mapInitialized = useRef(false);
 
   // Show toast notification
   const showToast = useCallback(
@@ -703,62 +732,125 @@ export default function App() {
 
   // Initialize Map
   useEffect(() => {
-    if (leafletReady && mapContainerRef.current && !mapInstance.current) {
-      const L = window.L;
-
-      try {
-        const m = L.map(mapContainerRef.current, {
-          zoomControl: false,
-          attributionControl: false,
-        }).setView(DEFAULT_CENTER, 13);
-
-        mapInstance.current = m;
-        markersGroup.current = L.layerGroup().addTo(m);
-
-        // Create tile layer (always start with dark)
-        tileLayerRef.current = L.tileLayer(
-          "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
-          {
-            subdomains: "abcd",
-            maxZoom: 20,
-            attribution: "&copy; OpenStreetMap &copy; CARTO",
-          }
-        ).addTo(m);
-
-        m.on("click", (e: any) => {
-          setIsAddingPoint({ lat: e.latlng.lat, lng: e.latlng.lng });
-          setSelectedPoint(null);
-        });
-
-        // Adjust audio volume based on zoom
-        m.on("zoomend", () => {
-          if (audioRef.current && !isMuted) {
-            const zoom = m.getZoom();
-            const volume = Math.min(0.5, (zoom - 10) * 0.05);
-            audioRef.current.volume = Math.max(0.05, volume);
-          }
-        });
-      } catch (err) {
-        console.error("Map initialization failed", err);
-      }
+    // Guard: Only initialize once
+    if (!leafletReady || !mapContainerRef.current || mapInitialized.current) {
+      return;
     }
 
-    return () => {
+    const L = window.L;
+
+    try {
+      // Double check the container doesn't already have a map
       if (mapInstance.current) {
+        return;
+      }
+
+      const m = L.map(mapContainerRef.current, {
+        zoomControl: false,
+        attributionControl: false,
+        minZoom: 2, // Prevent zooming out too far
+        maxZoom: 20,
+        worldCopyJump: true, // Seamlessly jump when crossing the dateline (like Google Maps)
+        // Only limit vertical bounds - allow horizontal continuous scroll
+        maxBounds: [
+          [-90, -Infinity], // Allow infinite horizontal scroll
+          [90, Infinity],
+        ],
+        maxBoundsViscosity: 1.0, // Strict vertical bounds
+      }).setView(DEFAULT_CENTER, 13);
+
+      mapInstance.current = m;
+      mapInitialized.current = true;
+      markersGroup.current = L.layerGroup().addTo(m);
+
+      // Create BOTH tile layers upfront - dark and light
+      // Dark tile layer (default visible)
+      tileLayerRef.current = L.tileLayer(
+        "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
+        {
+          subdomains: "abcd",
+          maxZoom: 20,
+          minZoom: 2,
+          attribution: "&copy; OpenStreetMap &copy; CARTO",
+        }
+      ).addTo(m);
+
+      // Light tile layer (hidden initially)
+      lightTileLayerRef.current = L.tileLayer(
+        "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",
+        {
+          subdomains: "abcd",
+          maxZoom: 20,
+          minZoom: 2,
+          attribution: "&copy; OpenStreetMap &copy; CARTO",
+        }
+      );
+      // Don't add to map yet - will be added when switching to light mode
+
+      m.on("click", (e: any) => {
+        setIsAddingPoint({ lat: e.latlng.lat, lng: e.latlng.lng });
+        setSelectedPoint(null);
+      });
+
+      // Adjust audio volume based on zoom
+      m.on("zoomend", () => {
+        if (audioRef.current) {
+          const zoom = m.getZoom();
+          const volume = Math.min(0.5, (zoom - 10) * 0.05);
+          audioRef.current.volume = Math.max(0.05, volume);
+        }
+      });
+    } catch (err) {
+      console.error("Map initialization failed", err);
+    }
+
+    // Cleanup only on unmount
+    return () => {
+      if (mapInstance.current && mapInitialized.current) {
         mapInstance.current.remove();
         mapInstance.current = null;
+        mapInitialized.current = false;
+        tileLayerRef.current = null;
+        lightTileLayerRef.current = null;
+        markersGroup.current = null;
       }
     };
   }, [leafletReady]);
 
-  // Update tile layer URL when theme changes - use setUrl() for seamless switching
+  // Toggle between dark and light tile layers when theme changes
   useEffect(() => {
-    if (tileLayerRef.current) {
-      const newUrl = isDarkMode
-        ? "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
-        : "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png";
+    if (!mapInstance.current || !mapInitialized.current) {
+      return;
+    }
 
-      tileLayerRef.current.setUrl(newUrl);
+    const map = mapInstance.current;
+
+    try {
+      if (isDarkMode) {
+        // Switch to dark: remove light, add dark
+        if (
+          lightTileLayerRef.current &&
+          map.hasLayer(lightTileLayerRef.current)
+        ) {
+          map.removeLayer(lightTileLayerRef.current);
+        }
+        if (tileLayerRef.current && !map.hasLayer(tileLayerRef.current)) {
+          tileLayerRef.current.addTo(map);
+        }
+      } else {
+        // Switch to light: remove dark, add light
+        if (tileLayerRef.current && map.hasLayer(tileLayerRef.current)) {
+          map.removeLayer(tileLayerRef.current);
+        }
+        if (
+          lightTileLayerRef.current &&
+          !map.hasLayer(lightTileLayerRef.current)
+        ) {
+          lightTileLayerRef.current.addTo(map);
+        }
+      }
+    } catch (err) {
+      console.error("Failed to toggle tile layer", err);
     }
   }, [isDarkMode]);
 
@@ -1252,7 +1344,7 @@ export default function App() {
       {/* Map Container */}
       <div
         ref={mapContainerRef}
-        className={`absolute inset-0 z-0 transition-colors duration-500 ${
+        className={`absolute inset-0 z-0 ${
           isDarkMode ? "bg-slate-950" : "bg-slate-100"
         }`}
       />
@@ -1778,7 +1870,7 @@ export default function App() {
                 isDarkMode ? "text-slate-400" : "text-slate-500"
               }`}
             >
-              Live • Jakarta
+              Live • {topCity}
             </span>
           </div>
 
@@ -1805,7 +1897,9 @@ export default function App() {
               isDarkMode ? "text-slate-400" : "text-slate-600"
             }`}
           >
-            orang lagi gak baik-baik aja malem ini
+            {cityPulseCount > 0
+              ? "cerita aktif lagi menitipkan rasa di peta"
+              : "belum ada cerita aktif saat ini"}
           </p>
 
           {/* Feature 7: Mood Weather */}
@@ -1819,7 +1913,7 @@ export default function App() {
                 isDarkMode ? "text-slate-500" : "text-slate-400"
               }`}
             >
-              Mood Weather Jakarta
+              Mood Weather {topCity}
             </p>
             <div className="space-y-1.5">
               {moodWeather.slice(0, 3).map((item) => (
