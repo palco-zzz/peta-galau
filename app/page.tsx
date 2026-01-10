@@ -712,18 +712,18 @@ export default function App() {
           attributionControl: false,
         }).setView(DEFAULT_CENTER, 13);
 
-        // Initial tile layer based on theme
-        const tileUrl = isDarkMode
-          ? "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
-          : "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png";
-
-        tileLayerRef.current = L.tileLayer(tileUrl, {
-          subdomains: "abcd",
-          maxZoom: 20,
-        }).addTo(m);
-
         mapInstance.current = m;
         markersGroup.current = L.layerGroup().addTo(m);
+
+        // Create tile layer (always start with dark)
+        tileLayerRef.current = L.tileLayer(
+          "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
+          {
+            subdomains: "abcd",
+            maxZoom: 20,
+            attribution: "&copy; OpenStreetMap &copy; CARTO",
+          }
+        ).addTo(m);
 
         m.on("click", (e: any) => {
           setIsAddingPoint({ lat: e.latlng.lat, lng: e.latlng.lng });
@@ -749,26 +749,16 @@ export default function App() {
         mapInstance.current = null;
       }
     };
-  }, [leafletReady, isMuted, isDarkMode]);
+  }, [leafletReady]);
 
-  // Update tile layer when theme changes
+  // Update tile layer URL when theme changes - use setUrl() for seamless switching
   useEffect(() => {
-    if (mapInstance.current && tileLayerRef.current && window.L) {
-      const L = window.L;
-      mapInstance.current.removeLayer(tileLayerRef.current);
-
-      const tileUrl = isDarkMode
+    if (tileLayerRef.current) {
+      const newUrl = isDarkMode
         ? "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
         : "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png";
 
-      tileLayerRef.current = L.tileLayer(tileUrl, {
-        subdomains: "abcd",
-        maxZoom: 20,
-      });
-
-      // Add tile layer to the bottom (behind markers)
-      tileLayerRef.current.addTo(mapInstance.current);
-      tileLayerRef.current.setZIndex(0);
+      tileLayerRef.current.setUrl(newUrl);
     }
   }, [isDarkMode]);
 
@@ -876,7 +866,7 @@ export default function App() {
           points.forEach((point, i) => {
             // Find nearest point
             let nearestDist = Infinity;
-            let nearestPoint = null;
+            let nearestPoint: MarkerPoint | null = null;
 
             points.forEach((other, j) => {
               if (i === j) return;
@@ -892,10 +882,11 @@ export default function App() {
             });
 
             if (nearestPoint) {
+              const np = nearestPoint as MarkerPoint;
               const line = L.polyline(
                 [
                   [point.lat, point.lng],
-                  [nearestPoint.lat, nearestPoint.lng],
+                  [np.lat, np.lng],
                 ],
                 {
                   color: moodColor,
@@ -2001,7 +1992,7 @@ export default function App() {
 
           {/* Button */}
           <div className="relative w-16 h-16 rounded-2xl bg-gradient-to-br from-indigo-500 to-purple-600 text-white shadow-2xl shadow-indigo-500/30 flex items-center justify-center transform transition-all duration-300 group-hover:scale-110 group-active:scale-95 group-hover:rotate-90">
-            <Icons.Plus size={28} strokeWidth={2.5} />
+            <Icons.Plus size={28} />
           </div>
         </button>
       )}
