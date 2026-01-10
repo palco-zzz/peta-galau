@@ -46,7 +46,7 @@ html {
 
 body {
   font-family: var(--font-sans);
-  background: var(--color-surface-dark);
+  background: var(--color-surface-light);
   overflow-x: hidden;
 }
 

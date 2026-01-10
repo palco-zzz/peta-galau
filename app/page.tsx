@@ -585,7 +585,7 @@ export default function App() {
       color?: string;
     }>
   >([]);
-  const [isDarkMode, setIsDarkMode] = useState(true);
+  const isDarkMode = false; // Light mode only
   const [activeNav, setActiveNav] = useState("beranda");
   const [showExploreSidebar, setShowExploreSidebar] = useState(false);
   const [showAboutModal, setShowAboutModal] = useState(false);
@@ -659,7 +659,6 @@ export default function App() {
   const [showShareCard, setShowShareCard] = useState(false);
 
   // Refs
-  const tileLayerRef = useRef<any>(null);
   const lightTileLayerRef = useRef<any>(null);
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapInstance = useRef<any>(null);
@@ -763,19 +762,7 @@ export default function App() {
       mapInitialized.current = true;
       markersGroup.current = L.layerGroup().addTo(m);
 
-      // Create BOTH tile layers upfront - dark and light
-      // Dark tile layer (default visible)
-      tileLayerRef.current = L.tileLayer(
-        "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
-        {
-          subdomains: "abcd",
-          maxZoom: 20,
-          minZoom: 2,
-          attribution: "&copy; OpenStreetMap &copy; CARTO",
-        }
-      ).addTo(m);
-
-      // Light tile layer (hidden initially)
+      // Light mode only - use light tile layer
       lightTileLayerRef.current = L.tileLayer(
         "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",
         {
@@ -784,8 +771,7 @@ export default function App() {
           minZoom: 2,
           attribution: "&copy; OpenStreetMap &copy; CARTO",
         }
-      );
-      // Don't add to map yet - will be added when switching to light mode
+      ).addTo(m);
 
       m.on("click", (e: any) => {
         setIsAddingPoint({ lat: e.latlng.lat, lng: e.latlng.lng });
@@ -810,49 +796,13 @@ export default function App() {
         mapInstance.current.remove();
         mapInstance.current = null;
         mapInitialized.current = false;
-        tileLayerRef.current = null;
         lightTileLayerRef.current = null;
         markersGroup.current = null;
       }
     };
   }, [leafletReady]);
 
-  // Toggle between dark and light tile layers when theme changes
-  useEffect(() => {
-    if (!mapInstance.current || !mapInitialized.current) {
-      return;
-    }
-
-    const map = mapInstance.current;
-
-    try {
-      if (isDarkMode) {
-        // Switch to dark: remove light, add dark
-        if (
-          lightTileLayerRef.current &&
-          map.hasLayer(lightTileLayerRef.current)
-        ) {
-          map.removeLayer(lightTileLayerRef.current);
-        }
-        if (tileLayerRef.current && !map.hasLayer(tileLayerRef.current)) {
-          tileLayerRef.current.addTo(map);
-        }
-      } else {
-        // Switch to light: remove dark, add light
-        if (tileLayerRef.current && map.hasLayer(tileLayerRef.current)) {
-          map.removeLayer(tileLayerRef.current);
-        }
-        if (
-          lightTileLayerRef.current &&
-          !map.hasLayer(lightTileLayerRef.current)
-        ) {
-          lightTileLayerRef.current.addTo(map);
-        }
-      }
-    } catch (err) {
-      console.error("Failed to toggle tile layer", err);
-    }
-  }, [isDarkMode]);
+  // Light mode only - no theme toggle needed
 
   // Sync Markers with age-based styling
   useEffect(() => {
@@ -1424,21 +1374,6 @@ export default function App() {
 
           {/* Action Buttons */}
           <div className="flex items-center gap-2 pr-1">
-            {/* Theme Toggle */}
-            <button
-              onClick={() => setIsDarkMode(!isDarkMode)}
-              className={`w-10 h-10 rounded-full flex items-center justify-center transition-all duration-300 ${
-                isDarkMode
-                  ? "text-amber-300 hover:bg-amber-400/10 hover:shadow-[0_0_15px_-5px_rgba(251,191,36,0.3)]"
-                  : "text-slate-600 hover:bg-slate-100"
-              }`}
-              title={
-                isDarkMode ? "Switch to Light Mode" : "Switch to Dark Mode"
-              }
-            >
-              {isDarkMode ? <Icons.Sun size={20} /> : <Icons.Moon size={20} />}
-            </button>
-
             {/* Mobile Menu Toggle */}
             <button
               onClick={() => setShowMobileMenu(!showMobileMenu)}
