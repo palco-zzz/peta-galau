@@ -17,6 +17,7 @@ export const stories = pgTable("stories", {
   lng: real("lng").notNull(),
   story: text("story").notNull(),
   mood: varchar("mood", { length: 50 }).notNull(),
+  photoUrl: text("photo_url"), // Optional photo URL (max 5MB)
   resonance: integer("resonance").default(0).notNull(),
   customColor: varchar("custom_color", { length: 20 }),
   isTimeCapsule: boolean("is_time_capsule").default(false),

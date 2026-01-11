@@ -80,3 +80,24 @@ export const statsApi = {
   // Get map stats
   get: () => fetchAPI<StatsResponse>("/stats"),
 };
+
+// Upload API
+export const uploadApi = {
+  // Upload photo (max 5MB)
+  uploadPhoto: async (file: File): Promise<{ url: string }> => {
+    const formData = new FormData();
+    formData.append("photo", file);
+
+    const response = await fetch(`${API_BASE}/upload`, {
+      method: "POST",
+      body: formData,
+    });
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.error || `Upload Error: ${response.status}`);
+    }
+
+    return response.json();
+  },
+};

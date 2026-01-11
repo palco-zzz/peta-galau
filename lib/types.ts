@@ -12,6 +12,7 @@ export interface Story {
   lng: number;
   story: string;
   mood: string;
+  photoUrl: string | null;
   resonance: number;
   customColor: string | null;
   isTimeCapsule: boolean;
@@ -41,6 +42,7 @@ export interface CreateStoryInput {
   lng: number;
   story: string;
   mood: string;
+  photoUrl?: string;
   customColor?: string;
   isTimeCapsule?: boolean;
   timeCapsuleDays?: number;

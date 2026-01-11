@@ -7,7 +7,7 @@ import React, {
   useCallback,
   useMemo,
 } from "react";
-import { storiesApi, statsApi } from "@/lib/api";
+import { storiesApi, statsApi, uploadApi } from "@/lib/api";
 import type { Story } from "@/lib/types";
 
 // TypeScript declarations
@@ -44,6 +44,7 @@ interface MarkerPoint {
   lng: number;
   story: string;
   mood: string;
+  photoUrl?: string | null; // Optional photo URL
   createdAt: number;
   resonance: number;
   whispers: Whisper[]; // Feature 1: Whisper Mode
@@ -184,6 +185,7 @@ const BADGE_DEFINITIONS: Badge[] = [
 const DEFAULT_CENTER: [number, number] = [-6.2088, 106.8456]; // Jakarta
 const MAX_CHARS = 100;
 const MAX_WHISPER_CHARS = 50;
+const MAX_PHOTO_SIZE = 5 * 1024 * 1024; // 5 MB in bytes
 const PIN_LIFESPAN_MS = 24 * 60 * 60 * 1000; // 24 hours
 
 // Utility: Fuzz location by 20-50m for privacy
@@ -207,6 +209,7 @@ const mapStoryToMarker = (story: Story): MarkerPoint => ({
   lng: story.lng,
   story: story.story,
   mood: story.mood,
+  photoUrl: story.photoUrl,
   createdAt: new Date(story.createdAt).getTime(),
   resonance: story.resonance,
   whispers: story.whispers.map((w) => ({
@@ -524,10 +527,30 @@ const Icons = {
       <line x1="17.5" y1="15" x2="9" y2="15"></line>
     </svg>
   ),
+  Locate: ({ size = 24, className = "" }) => (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+    >
+      <circle cx="12" cy="12" r="10" />
+      <line x1="22" y1="12" x2="18" y2="12" />
+      <line x1="6" y1="12" x2="2" y2="12" />
+      <line x1="12" y1="6" x2="12" y2="2" />
+      <line x1="12" y1="22" x2="12" y2="18" />
+    </svg>
+  ),
 };
 
 export default function App() {
   const [leafletReady, setLeafletReady] = useState(false);
+  const [isLocating, setIsLocating] = useState(false);
   const [markers, setMarkers] = useState<MarkerPoint[]>([]);
 
   // Load data from API
@@ -655,8 +678,18 @@ export default function App() {
   // Feature 12: Healing Progress
   const [showHealingUpdate, setShowHealingUpdate] = useState(false);
 
+  // Photo Upload State
+  const [selectedPhoto, setSelectedPhoto] = useState<File | null>(null);
+  const [photoPreview, setPhotoPreview] = useState<string | null>(null);
+  const [isUploading, setIsUploading] = useState(false);
+  const [photoError, setPhotoError] = useState<string | null>(null);
+  const photoInputRef = useRef<HTMLInputElement>(null);
+
   // Feature 14: Share Card
   const [showShareCard, setShowShareCard] = useState(false);
+
+  // Mobile Stats State
+  const [isStatsOpen, setIsStatsOpen] = useState(false);
 
   // Refs
   const lightTileLayerRef = useRef<any>(null);
@@ -772,6 +805,22 @@ export default function App() {
           attribution: "&copy; OpenStreetMap &copy; CARTO",
         }
       ).addTo(m);
+
+      // Feature: Auto-locate on startup
+      if (navigator.geolocation) {
+        navigator.geolocation.getCurrentPosition(
+          (position) => {
+            const { latitude, longitude } = position.coords;
+            // Fly to user location with a smooth animation
+            m.flyTo([latitude, longitude], 15, {
+              duration: 3,
+              easeLinearity: 0.25,
+            });
+          },
+          (err) => console.log("Geolocation failed or denied", err),
+          { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+        );
+      }
 
       m.on("click", (e: any) => {
         setIsAddingPoint({ lat: e.latlng.lat, lng: e.latlng.lng });
@@ -1055,12 +1104,74 @@ export default function App() {
     [selectedPoint, showToast, unlockedBadges]
   );
 
-  // Save new story with location fuzzing
+  // Handle photo selection
+  const handlePhotoSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    setPhotoError(null);
+
+    if (!file) {
+      setSelectedPhoto(null);
+      setPhotoPreview(null);
+      return;
+    }
+
+    // Validate file size (5 MB max)
+    if (file.size > MAX_PHOTO_SIZE) {
+      setPhotoError("Ukuran foto maksimal 5 MB");
+      setSelectedPhoto(null);
+      setPhotoPreview(null);
+      return;
+    }
+
+    // Validate file type
+    if (!file.type.startsWith("image/")) {
+      setPhotoError("File harus berupa gambar");
+      setSelectedPhoto(null);
+      setPhotoPreview(null);
+      return;
+    }
+
+    setSelectedPhoto(file);
+
+    // Create preview
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      setPhotoPreview(e.target?.result as string);
+    };
+    reader.readAsDataURL(file);
+  };
+
+  // Clear selected photo
+  const handleClearPhoto = () => {
+    setSelectedPhoto(null);
+    setPhotoPreview(null);
+    setPhotoError(null);
+    if (photoInputRef.current) {
+      photoInputRef.current.value = "";
+    }
+  };
+
+  // Save new story with location fuzzing and optional photo upload
   const handleSaveStory = async () => {
     if (!newStory.trim() || !isAddingPoint) return;
 
     const fuzzedLocation = fuzzLocation(isAddingPoint.lat, isAddingPoint.lng);
-    const now = Date.now();
+
+    // Upload photo if selected
+    let photoUrl: string | undefined;
+    if (selectedPhoto) {
+      setIsUploading(true);
+      try {
+        const uploadResult = await uploadApi.uploadPhoto(selectedPhoto);
+        photoUrl = uploadResult.url;
+      } catch (error) {
+        console.error("Photo upload failed:", error);
+        showToast("Gagal upload foto", "error");
+        setIsUploading(false);
+        return; // Don't proceed if photo upload fails
+      }
+      setIsUploading(false);
+    }
 
     // Prepare API payload
     const payload: any = {
@@ -1068,6 +1179,7 @@ export default function App() {
       lng: fuzzedLocation.lng,
       story: newStory.slice(0, MAX_CHARS),
       mood: selectedMood,
+      photoUrl: photoUrl,
       customColor: customColor || undefined,
       isTimeCapsule: isTimeCapsule,
       timeCapsuleDays: isTimeCapsule ? timeCapsuleDays : undefined,
@@ -1080,6 +1192,7 @@ export default function App() {
     setCustomColor(null);
     setUsePrompt(false);
     setIsTimeCapsule(false);
+    handleClearPhoto(); // Clear photo state
 
     // Show success animation
     setShowSuccessAnimation(true);
@@ -1229,6 +1342,35 @@ export default function App() {
       </div>
     );
   }
+
+  // Feature: Locate Me
+  const handleLocateMe = () => {
+    if (!navigator.geolocation) {
+      showToast("Browser tidak mendukung geolokasi", "error");
+      return;
+    }
+
+    setIsLocating(true);
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        const { latitude, longitude } = position.coords;
+        if (mapInstance.current) {
+          mapInstance.current.flyTo([latitude, longitude], 16, {
+            duration: 2,
+            easeLinearity: 0.25,
+          });
+          showToast("📍 Lokasi ditemukan", "success");
+        }
+        setIsLocating(false);
+      },
+      (error) => {
+        console.error(error);
+        showToast("Gagal mendeteksi lokasi (Pastikan GPS aktif)", "error");
+        setIsLocating(false);
+      },
+      { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+    );
+  };
 
   const selectedMoodData = MOOD_CATEGORIES.find(
     (m) => m.id === selectedPoint?.mood
@@ -1780,108 +1922,287 @@ export default function App() {
       )}
 
       {/* City Pulse Stats - Premium Widget */}
+      {/* City Pulse Stats - Premium Widget (Desktop & Mobile Trigger) */}
       <div
-        className={`absolute bottom-6 left-6 z-10 rounded-3xl overflow-hidden transition-all duration-500 hover:scale-[1.02] group cursor-default ${
-          isDarkMode ? "glass-panel" : "glass-panel-light"
+        className={`fixed md:absolute md:bottom-6 md:left-6 md:top-auto top-28 left-4 z-10 transition-all duration-300 md:w-auto ${
+          isDarkMode ? "md:glass-panel" : "md:glass-panel-light"
+        } ${
+          // Desktop: Card style
+          // Mobile: Small Pill style
+          "md:rounded-3xl md:shadow-lg md:shadow-indigo-500/10"
         }`}
       >
-        <div className="px-6 py-5">
-          {/* Header with live indicator */}
-          <div className="flex items-center gap-2 mb-3">
-            <div className="relative">
-              <div
-                className={`w-2 h-2 rounded-full ${
-                  isDarkMode ? "bg-emerald-400" : "bg-emerald-500"
+        {/* Desktop Content (Always Visible) */}
+        <div className="hidden md:block rounded-3xl overflow-hidden group hover:scale-[1.02] transition-transform duration-500">
+          <div className="px-6 py-5">
+            <div className="flex items-center gap-2 mb-3">
+              <div className="relative">
+                <div
+                  className={`w-2 h-2 rounded-full ${
+                    isDarkMode ? "bg-emerald-400" : "bg-emerald-500"
+                  }`}
+                />
+                <div
+                  className={`absolute inset-0 w-2 h-2 rounded-full animate-ping ${
+                    isDarkMode ? "bg-emerald-400" : "bg-emerald-500"
+                  }`}
+                />
+              </div>
+              <span
+                className={`text-[10px] font-bold uppercase tracking-[0.2em] ${
+                  isDarkMode ? "text-slate-400" : "text-slate-500"
                 }`}
-              />
-              <div
-                className={`absolute inset-0 w-2 h-2 rounded-full animate-ping ${
-                  isDarkMode ? "bg-emerald-400" : "bg-emerald-500"
+              >
+                Live • {topCity}
+              </span>
+            </div>
+            <div className="flex items-baseline gap-2 mb-2">
+              <span
+                className={`text-4xl font-bold tabular-nums tracking-tight ${
+                  isDarkMode ? "text-gradient" : "text-indigo-600"
                 }`}
+              >
+                {cityPulseCount.toLocaleString()}
+              </span>
+              <Icons.Heart
+                size={16}
+                className={`${
+                  isDarkMode ? "text-rose-400" : "text-rose-500"
+                } animate-pulse`}
               />
             </div>
-            <span
-              className={`text-[10px] font-bold uppercase tracking-[0.2em] ${
-                isDarkMode ? "text-slate-400" : "text-slate-500"
-              }`}
-            >
-              Live • {topCity}
-            </span>
-          </div>
-
-          {/* Main stat */}
-          <div className="flex items-baseline gap-2 mb-2">
-            <span
-              className={`text-4xl font-bold tabular-nums tracking-tight ${
-                isDarkMode ? "text-gradient" : "text-indigo-600"
-              }`}
-            >
-              {cityPulseCount.toLocaleString()}
-            </span>
-            <Icons.Heart
-              size={16}
-              className={`${
-                isDarkMode ? "text-rose-400" : "text-rose-500"
-              } animate-pulse`}
-            />
-          </div>
-
-          {/* Description */}
-          <p
-            className={`text-sm leading-relaxed max-w-[200px] ${
-              isDarkMode ? "text-slate-400" : "text-slate-600"
-            }`}
-          >
-            {cityPulseCount > 0
-              ? "cerita aktif lagi menitipkan rasa di peta"
-              : "belum ada cerita aktif saat ini"}
-          </p>
-
-          {/* Feature 7: Mood Weather */}
-          <div
-            className={`mt-4 pt-4 border-t ${
-              isDarkMode ? "border-white/5" : "border-black/5"
-            }`}
-          >
             <p
-              className={`text-[9px] font-bold uppercase tracking-widest mb-2 ${
-                isDarkMode ? "text-slate-500" : "text-slate-400"
+              className={`text-sm leading-relaxed max-w-[200px] ${
+                isDarkMode ? "text-slate-400" : "text-slate-600"
               }`}
             >
-              Mood Weather {topCity}
+              {cityPulseCount > 0
+                ? "cerita aktif lagi menitipkan rasa di peta"
+                : "belum ada cerita aktif saat ini"}
             </p>
-            <div className="space-y-1.5">
-              {moodWeather.slice(0, 3).map((item) => (
-                <div key={item.mood} className="flex items-center gap-2">
-                  <span className="text-xs">{item.emoji}</span>
-                  <div className="flex-1 h-1.5 bg-black/20 rounded-full overflow-hidden">
-                    <div
-                      className="h-full rounded-full transition-all duration-500"
-                      style={{
-                        width: `${item.percentage}%`,
-                        backgroundColor: item.color,
-                      }}
-                    />
+            <div
+              className={`mt-4 pt-4 border-t ${
+                isDarkMode ? "border-white/5" : "border-black/5"
+              }`}
+            >
+              <div className="space-y-1.5">
+                {moodWeather.slice(0, 3).map((item) => (
+                  <div key={item.mood} className="flex items-center gap-2">
+                    <span className="text-xs">{item.emoji}</span>
+                    <div className="flex-1 h-1.5 bg-black/20 rounded-full overflow-hidden">
+                      <div
+                        className="h-full rounded-full"
+                        style={{
+                          width: `${item.percentage}%`,
+                          backgroundColor: item.color,
+                        }}
+                      />
+                    </div>
                   </div>
-                  <span
-                    className={`text-[10px] font-bold w-8 text-right ${
-                      isDarkMode ? "text-slate-400" : "text-slate-500"
-                    }`}
-                  >
-                    {item.percentage}%
-                  </span>
-                </div>
-              ))}
+                ))}
+              </div>
             </div>
           </div>
+          <div className="h-1 bg-gradient-to-r from-indigo-500 via-purple-500 to-rose-500" />
         </div>
 
-        {/* Gradient accent bar */}
-        <div className="h-1 bg-gradient-to-r from-indigo-500 via-purple-500 to-rose-500" />
+        {/* Mobile Trigger Pill - Shows immediate info */}
+        <button
+          onClick={() => setIsStatsOpen(true)}
+          className={`md:hidden flex items-center gap-3 px-4 py-2.5 rounded-full shadow-lg backdrop-blur-md border transition-all active:scale-95 ${
+            isDarkMode
+              ? "bg-slate-900/80 border-white/10 text-white"
+              : "bg-white/90 border-slate-200 text-slate-800"
+          }`}
+        >
+          <div className="flex items-center gap-2">
+            <div
+              className={`w-1.5 h-1.5 rounded-full animate-pulse ${
+                isDarkMode ? "bg-emerald-400" : "bg-emerald-500"
+              }`}
+            />
+            <span className="text-xs font-bold tracking-tight">{topCity}</span>
+          </div>
+          <div
+            className={`w-px h-3 ${isDarkMode ? "bg-white/20" : "bg-black/10"}`}
+          />
+          <div className="flex items-center gap-1.5">
+            <span className="text-xs">{moodWeather[0]?.emoji || "❤️"}</span>
+            <span className="text-xs font-bold tabular-nums">
+              {cityPulseCount}
+            </span>
+          </div>
+        </button>
       </div>
 
+      {/* Mobile Stats Modal Overlay */}
+      {isStatsOpen && (
+        <div className="fixed inset-0 z-[60] md:hidden flex items-end sm:items-center justify-center p-4 animate-in fade-in duration-200">
+          {/* Backdrop */}
+          <div
+            className="absolute inset-0 bg-black/40 backdrop-blur-sm"
+            onClick={() => setIsStatsOpen(false)}
+          />
+
+          {/* Modal Card */}
+          <div
+            className={`relative w-full max-w-sm rounded-[2rem] overflow-hidden shadow-2xl animate-in slide-in-from-bottom-10 zoom-in-95 duration-300 ${
+              isDarkMode ? "glass-panel" : "glass-panel-light bg-white"
+            }`}
+          >
+            <div className="p-6">
+              <div className="flex items-center justify-between mb-6">
+                <div className="flex items-center gap-3">
+                  <div className="relative">
+                    <div
+                      className={`w-3 h-3 rounded-full ${
+                        isDarkMode ? "bg-emerald-400" : "bg-emerald-500"
+                      }`}
+                    />
+                    <div
+                      className={`absolute inset-0 w-3 h-3 rounded-full animate-ping ${
+                        isDarkMode ? "bg-emerald-400" : "bg-emerald-500"
+                      }`}
+                    />
+                  </div>
+                  <h3
+                    className={`text-lg font-bold tracking-tight ${
+                      isDarkMode ? "text-white" : "text-slate-900"
+                    }`}
+                  >
+                    City Pulse: {topCity}
+                  </h3>
+                </div>
+                <button
+                  onClick={() => setIsStatsOpen(false)}
+                  className={`p-2 rounded-full transition-colors ${
+                    isDarkMode
+                      ? "bg-white/5 hover:bg-white/10 text-slate-400"
+                      : "bg-slate-100 hover:bg-slate-200 text-slate-500"
+                  }`}
+                >
+                  <Icons.X size={20} />
+                </button>
+              </div>
+
+              {/* Main Stat Big */}
+              <div className="flex flex-col items-center justify-center py-6 mb-6 relative">
+                <div
+                  className={`absolute inset-0 rounded-full blur-3xl opacity-20 ${
+                    isDarkMode ? "bg-indigo-500" : "bg-indigo-300"
+                  }`}
+                />
+                <div className="flex items-baseline gap-3 relative z-10">
+                  <span
+                    className={`text-6xl font-bold tracking-tighter ${
+                      isDarkMode ? "text-white" : "text-slate-900"
+                    }`}
+                  >
+                    {cityPulseCount.toLocaleString()}
+                  </span>
+                  <Icons.Heart
+                    size={24}
+                    className="text-rose-500 animate-pulse"
+                  />
+                </div>
+                <p
+                  className={`text-sm font-medium mt-2 ${
+                    isDarkMode ? "text-slate-400" : "text-slate-500"
+                  }`}
+                >
+                  Titik galau aktif
+                </p>
+              </div>
+
+              {/* Mood Weather List */}
+              <div className="space-y-4">
+                <p
+                  className={`text-xs font-bold uppercase tracking-widest ${
+                    isDarkMode ? "text-slate-500" : "text-slate-400"
+                  }`}
+                >
+                  Dominant Moods
+                </p>
+                <div className="space-y-3">
+                  {moodWeather.slice(0, 4).map((item) => (
+                    <div
+                      key={item.mood}
+                      className={`flex items-center gap-3 p-3 rounded-xl border ${
+                        isDarkMode
+                          ? "bg-white/5 border-white/5"
+                          : "bg-slate-50 border-slate-100"
+                      }`}
+                    >
+                      <span className="text-2xl">{item.emoji}</span>
+                      <div className="flex-1">
+                        <div className="flex items-center justify-between mb-1">
+                          <span
+                            className={`text-sm font-medium ${
+                              isDarkMode ? "text-slate-200" : "text-slate-700"
+                            }`}
+                          >
+                            {item.label || item.mood}
+                          </span>
+                          <span
+                            className={`text-xs w-10 text-right font-bold ${
+                              isDarkMode ? "text-slate-400" : "text-slate-500"
+                            }`}
+                          >
+                            {item.percentage}%
+                          </span>
+                        </div>
+                        <div className="h-1.5 w-full bg-black/10 rounded-full overflow-hidden">
+                          <div
+                            className="h-full rounded-full transition-all duration-500"
+                            style={{
+                              width: `${item.percentage}%`,
+                              backgroundColor: item.color,
+                            }}
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            {/* Footer Gradient */}
+            <div className="h-1 w-full bg-gradient-to-r from-indigo-500 via-purple-500 to-rose-500" />
+          </div>
+        </div>
+      )}
+
       {/* Map Controls - Constellation Toggle */}
-      <div className={`absolute top-24 left-6 z-10 flex flex-col gap-2`}>
+      <div
+        className={`fixed md:absolute md:top-24 md:left-6 top-28 right-4 z-10 flex flex-col gap-2 items-end md:items-start`}
+      >
+        {/* Locate Me */}
+        <button
+          onClick={handleLocateMe}
+          className={`p-3 rounded-2xl transition-all duration-300 ${
+            isLocating ? "animate-pulse bg-indigo-100 text-indigo-600" : ""
+          } ${
+            !isLocating && isDarkMode
+              ? "glass-panel hover:bg-white/10"
+              : !isLocating
+              ? "glass-panel-light hover:bg-slate-100"
+              : ""
+          }`}
+          title="Lokasi Saya"
+        >
+          <Icons.Locate
+            size={20}
+            className={
+              isLocating
+                ? "animate-spin"
+                : isDarkMode
+                ? "text-indigo-400"
+                : "text-indigo-600"
+            }
+          />
+        </button>
+
         <button
           onClick={() => setShowConstellation(!showConstellation)}
           className={`p-3 rounded-2xl transition-all duration-300 ${
@@ -1960,7 +2281,7 @@ export default function App() {
       {/* Hint - Premium Floating Pill */}
       {!selectedPoint && !isAddingPoint && (
         <div
-          className={`absolute bottom-6 right-6 z-10 rounded-2xl overflow-hidden transition-all duration-500 hover:scale-[1.02] ${
+          className={`absolute bottom-6 left-6 md:left-auto md:right-6 z-10 rounded-2xl overflow-hidden transition-all duration-500 hover:scale-[1.02] ${
             isFirstVisit ? "animate-bounce" : ""
           } ${isDarkMode ? "glass-panel" : "glass-panel-light"}`}
         >
@@ -2008,7 +2329,7 @@ export default function App() {
       {/* Mobile Add Button - Premium FAB */}
       {!isAddingPoint && !selectedPoint && (
         <button
-          className="md:hidden absolute bottom-28 right-6 z-10 group"
+          className="md:hidden absolute bottom-6 right-6 z-10 group"
           onClick={() => {
             if (mapInstance.current) {
               const c = mapInstance.current.getCenter();
@@ -2266,18 +2587,25 @@ export default function App() {
 
       {/* Add Story Modal */}
       {isAddingPoint && (
-        <div className="absolute inset-0 z-40 flex items-center justify-center p-4 backdrop-blur-md bg-black/20">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 backdrop-blur-md bg-black/40 animate-in fade-in duration-200">
+          {/* Backdrop click to close */}
           <div
-            className={`w-full max-w-md rounded-[2rem] shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-300 ${
-              isDarkMode ? "glass-panel" : "glass-panel-light"
+            className="absolute inset-0"
+            onClick={() => setIsAddingPoint(null)}
+          />
+
+          <div
+            className={`relative w-full max-w-md rounded-3xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh] animate-in zoom-in-95 duration-300 ${
+              isDarkMode ? "glass-panel" : "glass-panel-light bg-white"
             }`}
           >
+            {/* Header */}
             <div
-              className={`p-6 border-b ${
+              className={`p-4 md:p-6 border-b shrink-0 flex items-center justify-between ${
                 isDarkMode ? "border-white/10" : "border-black/5"
               }`}
             >
-              <div className="flex items-center justify-between">
+              <div>
                 <h3
                   className={`text-lg font-bold ${
                     isDarkMode ? "text-white" : "text-slate-900"
@@ -2285,27 +2613,28 @@ export default function App() {
                 >
                   Drop Curhatan Lo
                 </h3>
-                <button
-                  onClick={() => setIsAddingPoint(null)}
-                  className={`p-2 rounded-full transition-colors ${
-                    isDarkMode
-                      ? "bg-white/5 hover:bg-white/10 text-slate-300"
-                      : "bg-black/5 hover:bg-black/10 text-slate-600"
+                <p
+                  className={`text-xs font-medium mt-0.5 ${
+                    isDarkMode ? "text-indigo-200/60" : "text-indigo-600/60"
                   }`}
                 >
-                  <Icons.X size={18} />
-                </button>
+                  Lokasi lo bakal di-blur biar aman
+                </p>
               </div>
-              <p
-                className={`text-xs font-medium mt-1 ${
-                  isDarkMode ? "text-indigo-200/60" : "text-indigo-600/60"
+              <button
+                onClick={() => setIsAddingPoint(null)}
+                className={`p-2 rounded-full transition-colors ${
+                  isDarkMode
+                    ? "bg-white/5 hover:bg-white/10 text-slate-300"
+                    : "bg-black/5 hover:bg-black/10 text-slate-600"
                 }`}
               >
-                Lokasi lo bakal di-blur biar aman
-              </p>
+                <Icons.X size={20} />
+              </button>
             </div>
 
-            <div className="p-6 space-y-5">
+            {/* Scrollable Content */}
+            <div className="p-4 md:p-6 space-y-4 md:space-y-5 overflow-y-auto custom-scrollbar">
               {/* Feature 9: Daily Prompt */}
               <button
                 onClick={() => {
@@ -2314,7 +2643,7 @@ export default function App() {
                     setNewStory("");
                   }
                 }}
-                className={`w-full p-4 rounded-2xl text-left transition-all duration-300 border ${
+                className={`w-full p-3 md:p-4 rounded-2xl text-left transition-all duration-300 border ${
                   usePrompt
                     ? isDarkMode
                       ? "bg-amber-500/10 border-amber-500/30"
@@ -2343,7 +2672,7 @@ export default function App() {
                     </p>
                   </div>
                   <div
-                    className={`w-5 h-5 rounded-full border-2 flex items-center justify-center transition-all ${
+                    className={`shrink-0 w-5 h-5 rounded-full border-2 flex items-center justify-center transition-all ${
                       usePrompt
                         ? isDarkMode
                           ? "bg-amber-500 border-amber-500"
@@ -2363,7 +2692,7 @@ export default function App() {
               {/* Feature 10: Time Capsule Toggle */}
               <button
                 onClick={() => setIsTimeCapsule(!isTimeCapsule)}
-                className={`w-full p-4 rounded-2xl text-left transition-all duration-300 border ${
+                className={`w-full p-3 md:p-4 rounded-2xl text-left transition-all duration-300 border ${
                   isTimeCapsule
                     ? isDarkMode
                       ? "bg-purple-500/10 border-purple-500/30"
@@ -2388,11 +2717,11 @@ export default function App() {
                         isDarkMode ? "text-slate-400" : "text-slate-500"
                       }`}
                     >
-                      Cerita baru unlock setelah {timeCapsuleDays} hari
+                      Unlock setelah {timeCapsuleDays} hari
                     </p>
                   </div>
                   <div
-                    className={`w-5 h-5 rounded-full border-2 flex items-center justify-center transition-all ${
+                    className={`shrink-0 w-5 h-5 rounded-full border-2 flex items-center justify-center transition-all ${
                       isTimeCapsule
                         ? isDarkMode
                           ? "bg-purple-500 border-purple-500"
@@ -2410,12 +2739,12 @@ export default function App() {
               </button>
 
               {/* Mood Selection - More compact */}
-              <div className="flex gap-2 overflow-x-auto pb-2">
-                {MOOD_CATEGORIES.slice(0, 3).map((mood) => (
+              <div className="flex gap-2 overflow-x-auto pb-2 no-scrollbar">
+                {MOOD_CATEGORIES.map((mood) => (
                   <button
                     key={mood.id}
                     onClick={() => setSelectedMood(mood.id)}
-                    className={`flex-1 py-4 rounded-2xl text-center transition-all duration-300 border ${
+                    className={`shrink-0 w-24 py-3 rounded-2xl text-center transition-all duration-300 border ${
                       selectedMood === mood.id
                         ? isDarkMode
                           ? "bg-indigo-500/20 border-indigo-500/50 shadow-[0_0_20px_-5px_rgba(99,102,241,0.3)]"
@@ -2425,13 +2754,13 @@ export default function App() {
                         : "bg-slate-50 border-transparent hover:bg-slate-100"
                     }`}
                   >
-                    <span className="text-2xl block mb-2">{mood.emoji}</span>
+                    <span className="text-2xl block mb-1">{mood.emoji}</span>
                     <p
-                      className={`text-[10px] font-bold uppercase tracking-wider ${
+                      className={`text-[9px] font-bold uppercase tracking-wider mx-1 truncate ${
                         isDarkMode ? "text-slate-300" : "text-slate-600"
                       }`}
                     >
-                      {mood.label}
+                      {mood.label.split(" ")[0]}
                     </p>
                   </button>
                 ))}
@@ -2439,7 +2768,7 @@ export default function App() {
 
               {/* Feature 5: Color Your Mood */}
               <div
-                className={`p-4 rounded-2xl border ${
+                className={`p-3 md:p-4 rounded-2xl border ${
                   isDarkMode
                     ? "bg-white/5 border-white/10"
                     : "bg-slate-50 border-slate-100"
@@ -2469,23 +2798,33 @@ export default function App() {
                     </button>
                   )}
                 </div>
-                <div className="flex gap-2 flex-wrap">
+                <div className="flex gap-2 overflow-x-auto pb-2 no-scrollbar px-1">
                   {[
                     "#ef4444", // Red
                     "#f97316", // Orange
+                    "#f59e0b", // Amber
                     "#eab308", // Yellow
+                    "#84cc16", // Lime
                     "#22c55e", // Green
+                    "#10b981", // Emerald
+                    "#14b8a6", // Teal
                     "#06b6d4", // Cyan
+                    "#0ea5e9", // Sky
                     "#3b82f6", // Blue
-                    "#8b5cf6", // Purple
+                    "#6366f1", // Indigo
+                    "#8b5cf6", // Violet
+                    "#a855f7", // Purple
+                    "#d946ef", // Fuchsia
                     "#ec4899", // Pink
                     "#f43f5e", // Rose
                     "#64748b", // Slate
+                    "#78716c", // Stone
+                    "#1c1917", // Neutral Dark
                   ].map((color) => (
                     <button
                       key={color}
                       onClick={() => setCustomColor(color)}
-                      className={`w-8 h-8 rounded-xl transition-all duration-300 border-2 ${
+                      className={`shrink-0 w-8 h-8 md:w-9 md:h-9 rounded-full transition-all duration-300 border-2 ${
                         customColor === color
                           ? "scale-110 ring-2 ring-offset-2 border-white"
                           : "border-transparent hover:scale-105"
@@ -2498,28 +2837,13 @@ export default function App() {
                         backgroundColor: color,
                         boxShadow:
                           customColor === color
-                            ? `0 0 20px ${color}50`
+                            ? `0 0 20px ${color}80`
                             : "none",
                       }}
                       title={`Use ${color}`}
                     />
                   ))}
                 </div>
-                {customColor && (
-                  <div className="mt-3 flex items-center gap-2">
-                    <div
-                      className="w-4 h-4 rounded-full"
-                      style={{ backgroundColor: customColor }}
-                    />
-                    <p
-                      className={`text-[10px] ${
-                        isDarkMode ? "text-slate-400" : "text-slate-500"
-                      }`}
-                    >
-                      Preview warna pin kamu
-                    </p>
-                  </div>
-                )}
               </div>
 
               {/* Story Input */}
@@ -2528,7 +2852,7 @@ export default function App() {
                   rows={3}
                   maxLength={MAX_CHARS}
                   placeholder="Tulis kegalauanmu dalam 100 karakter..."
-                  className={`w-full p-5 rounded-2xl border transition-all outline-none resize-none text-base leading-relaxed ${
+                  className={`w-full p-4 md:p-5 rounded-2xl border transition-all outline-none resize-none text-base leading-relaxed ${
                     isDarkMode
                       ? "bg-black/20 border-white/10 focus:border-indigo-500/50 text-white placeholder:text-slate-500"
                       : "bg-slate-50 border-slate-100 focus:border-indigo-500/30 text-slate-900 placeholder:text-slate-400"
@@ -2549,40 +2873,129 @@ export default function App() {
                 </span>
               </div>
 
-              <button
-                onClick={handleSaveStory}
-                disabled={!newStory.trim()}
-                className="w-full py-4 rounded-2xl bg-gradient-to-r from-indigo-500 via-indigo-600 to-purple-600 text-white font-bold tracking-wide transition-all duration-300 disabled:opacity-40 disabled:cursor-not-allowed transform active:scale-[0.98] relative overflow-hidden group"
+              {/* Photo Upload Section */}
+              <div
+                className={`p-3 md:p-4 rounded-2xl border ${
+                  isDarkMode
+                    ? "bg-white/5 border-white/10"
+                    : "bg-slate-50 border-slate-100"
+                }`}
               >
-                {/* Glow overlay on hover */}
-                <div className="absolute inset-0 bg-gradient-to-r from-indigo-400 via-purple-500 to-pink-500 opacity-0 group-hover:opacity-100 transition-opacity duration-300" />
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-2">
+                    <span className="text-lg">📷</span>
+                    <p
+                      className={`text-xs font-bold uppercase tracking-widest ${
+                        isDarkMode ? "text-slate-400" : "text-slate-500"
+                      }`}
+                    >
+                      Foto (Opsional)
+                    </p>
+                  </div>
+                  <span
+                    className={`text-[10px] font-medium ${
+                      isDarkMode ? "text-slate-500" : "text-slate-400"
+                    }`}
+                  >
+                    Max 5 MB
+                  </span>
+                </div>
 
-                {/* Button content */}
-                <span className="relative flex items-center justify-center gap-2">
-                  <Icons.Send
-                    size={18}
-                    className="transition-transform group-hover:translate-x-1 group-hover:-translate-y-1"
-                  />
-                  Drop ke Peta
-                </span>
-
-                {/* Shimmer effect */}
-                <div className="absolute inset-0 -translate-x-full group-hover:translate-x-full transition-transform duration-1000 bg-gradient-to-r from-transparent via-white/20 to-transparent" />
-              </button>
-
-              {/* Footer info */}
-              <div className="flex items-center justify-center gap-2">
-                <Icons.Clock
-                  size={12}
-                  className={isDarkMode ? "text-slate-500" : "text-slate-400"}
+                {/* Hidden file input */}
+                <input
+                  ref={photoInputRef}
+                  type="file"
+                  accept="image/*"
+                  onChange={handlePhotoSelect}
+                  className="hidden"
                 />
-                <p
-                  className={`text-[10px] font-medium ${
-                    isDarkMode ? "text-slate-500" : "text-slate-400"
-                  }`}
+
+                {/* Photo preview or upload button */}
+                {photoPreview ? (
+                  <div className="relative">
+                    <img
+                      src={photoPreview}
+                      alt="Preview"
+                      className="w-full h-40 object-cover rounded-xl"
+                    />
+                    <button
+                      onClick={handleClearPhoto}
+                      className="absolute top-2 right-2 w-8 h-8 rounded-full bg-black/60 text-white flex items-center justify-center hover:bg-black/80 transition-colors"
+                    >
+                      <Icons.X size={16} />
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    onClick={() => photoInputRef.current?.click()}
+                    className={`w-full py-4 rounded-xl border-2 border-dashed transition-all ${
+                      isDarkMode
+                        ? "border-white/20 hover:border-indigo-500/50 hover:bg-white/5 text-slate-400"
+                        : "border-slate-200 hover:border-indigo-300 hover:bg-indigo-50/50 text-slate-500"
+                    }`}
+                  >
+                    <div className="flex flex-col items-center gap-2">
+                      <span className="text-2xl">📸</span>
+                      <span className="text-sm font-medium">
+                        Tap untuk pilih foto
+                      </span>
+                    </div>
+                  </button>
+                )}
+
+                {/* Error message */}
+                {photoError && (
+                  <p className="mt-2 text-xs text-red-500 font-medium">
+                    ⚠️ {photoError}
+                  </p>
+                )}
+              </div>
+
+              <div className="pt-2">
+                <button
+                  onClick={handleSaveStory}
+                  disabled={!newStory.trim() || isUploading}
+                  className="w-full py-3.5 md:py-4 rounded-2xl bg-gradient-to-r from-indigo-500 via-indigo-600 to-purple-600 text-white font-bold tracking-wide transition-all duration-300 disabled:opacity-40 disabled:cursor-not-allowed transform active:scale-[0.98] relative overflow-hidden group"
                 >
-                  Pin bakal ilang dalam 24 jam
-                </p>
+                  {/* Glow overlay on hover */}
+                  <div className="absolute inset-0 bg-gradient-to-r from-indigo-400 via-purple-500 to-pink-500 opacity-0 group-hover:opacity-100 transition-opacity duration-300" />
+
+                  {/* Button content */}
+                  <span className="relative flex items-center justify-center gap-2">
+                    {isUploading ? (
+                      <>
+                        <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                        Mengupload...
+                      </>
+                    ) : (
+                      <>
+                        <Icons.Send
+                          size={18}
+                          className="transition-transform group-hover:translate-x-1 group-hover:-translate-y-1"
+                        />
+                        Drop ke Peta
+                      </>
+                    )}
+                  </span>
+
+                  {/* Shimmer effect */}
+                  <div className="absolute inset-0 -translate-x-full group-hover:translate-x-full transition-transform duration-1000 bg-gradient-to-r from-transparent via-white/20 to-transparent" />
+                </button>
+
+                {/* Footer info */}
+                <div className="flex items-center justify-center gap-2 mt-3">
+                  <Icons.Clock
+                    size={12}
+                    className={isDarkMode ? "text-slate-500" : "text-slate-400"}
+                  />
+                  <p
+                    className={`text-[10px] font-medium ${
+                      isDarkMode ? "text-slate-500" : "text-slate-400"
+                    }`}
+                  >
+                    Pin bakal ilang dalam 24 jam
+                  </p>
+                </div>
               </div>
             </div>
           </div>
@@ -2679,6 +3092,17 @@ export default function App() {
                   {selectedPoint.story}
                 </p>
               </div>
+
+              {/* Photo if exists */}
+              {selectedPoint.photoUrl && (
+                <div className="mb-4">
+                  <img
+                    src={selectedPoint.photoUrl}
+                    alt="Story photo"
+                    className="w-full h-48 object-cover rounded-2xl"
+                  />
+                </div>
+              )}
 
               {/* Healing Note if exists */}
               {selectedPoint.healingNote && (
