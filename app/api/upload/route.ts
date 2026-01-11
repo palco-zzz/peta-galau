@@ -53,8 +53,8 @@ export async function POST(request: NextRequest) {
 
     await writeFile(filepath, buffer);
 
-    // Return the public URL
-    const url = `/uploads/${filename}`;
+    // Return the public URL (use API route for production compatibility)
+    const url = `/api/uploads/${filename}`;
 
     return NextResponse.json({ url }, { status: 201 });
   } catch (error) {
